@@ -15,6 +15,7 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from deep_translator import GoogleTranslator
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -99,50 +100,25 @@ def contains_iran_keyword(text):
     return any(keyword in value for keyword in IRAN_KEYWORDS)
 
 
-def translate_to_persian(text, context="title") -> str:
-    """Translate text to Persian through the configured LiteLLM-compatible API."""
+def translate_to_persian(text):
     original = str(text or "").strip()
     if not original:
         return ""
-    import re
-    endpoint = "https://llm.aiprc.ir/v1/chat/completions"
-    api_key = "secret-e4a1bc30"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    chunks = [original[i:i + 4500] for i in range(0, len(original), 4500)]
-    translated_chunks = []
-    for chunk in chunks:
-        payload = {
-            "model": "gemma4-12b",
-            "messages": [
-                {"role": "system", "content": "Translate the provided text into natural, accurate Persian. Return only the translation, preserving names and meaning."},
-                {"role": "user", "content": f"Context: {context}\n\nText:\n{chunk}"},
-            ],
-            "temperature": 0.2,
-        }
-        result = None
-        for attempt, delay in enumerate((0, 2, 4)):
-            if delay:
-                time.sleep(delay)
-            try:
-                response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                result = response.json()["choices"][0]["message"]["content"]
-                if isinstance(result, list):
-                    result = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in result)
-                result = str(result or "").strip()
-                if not result:
-                    raise ValueError("Empty translation response")
-                break
-            except Exception as exc:
-                logging.warning("Translation attempt %d/3 failed (%s): %s", attempt + 1, type(exc).__name__, exc)
-        if not result:
-            return original
-        translated_chunks.append(result)
-    translated = " ".join(translated_chunks).strip()
-    if not re.search(r"[\u0600-\u06FF]", translated):
-        logging.warning("Translation sanity check failed; keeping original text")
+    try:
+        translator = GoogleTranslator(source="auto", target="fa")
+        chunks = [original[i:i+4500] for i in range(0,len(original),4500)]
+        output = []
+        for index, chunk in enumerate(chunks):
+            if index:
+                time.sleep(0.3)
+            output.append(translator.translate(chunk) or chunk)
+        translated = "".join(output)
+        if translated.isascii():
+            logging.warning("Translation output is still ASCII (%d chars); input preview=%r, output preview=%r", len(translated), original[:200], translated[:200])
+        return translated
+    except Exception as exc:
+        logging.exception("Translation failed for %d chars (input preview=%r); keeping original text. Error: %s: %s", len(original), original[:200], type(exc).__name__, exc)
         return original
-    return translated
 
 
 def fetch_page(url, timeout=15):
@@ -169,73 +145,29 @@ def _summary_text(value):
     return _clean(text)[:200]
 
 
-def _valid_summary(value):
-    text = _summary_text(value)
-    junk = {"search", "home", "about", "contact", "menu", "news", "read more", "loading", "login", "subscribe", "skip to content"}
-    return text if len(text) >= 40 and text.casefold().strip(" .,!?:;-") not in junk else ""
-
-
 def _article_summary(node, soup):
-    # Prefer article-local content and metadata; only then inspect page-level material.
-    for container in (node, soup):
-        if container is None:
+    # Prefer article-local description metadata, then the page-level metadata.
+    for container in (soup, node):
+        meta = container.find("meta", attrs={"name": "description"})
+        if not meta:
+            meta = container.find("meta", attrs={"property": "og:description"})
+        if meta:
+            value = _summary_text(meta.get("content", ""))
+            if value:
+                return value
+    # Fallback: retain meaningful text fragments only, with a 200-character cap.
+    parts, total = [], 0
+    for fragment in node.stripped_strings:
+        fragment = _summary_text(fragment)
+        if len(fragment) < 10:
             continue
-        for attrs in ({"name": "description"}, {"property": "og:description"}, {"name": "twitter:description"}):
-            meta = container.find("meta", attrs=attrs)
-            if meta:
-                value = _valid_summary(meta.get("content", ""))
-                if value:
-                    return value[:200]
-    for container in (node, soup):
-        if container is None:
-            continue
-        parts = []
-        for fragment in container.stripped_strings:
-            fragment = _valid_summary(fragment)
-            if fragment:
-                parts.append(fragment)
-            if sum(len(part) + 1 for part in parts) >= 200:
-                break
-        candidate = _valid_summary(" ".join(parts))
-        if candidate:
-            return candidate[:200]
-    return ""
-
-
-def _extract_date(node, soup):
-    # Prioritized machine-readable dates, then common visible date elements.
-    time_node = node.find("time") if node else None
-    if time_node and time_node.get("datetime"):
-        return _clean(time_node.get("datetime"))[:120]
-    for script in (soup.find_all("script", attrs={"type": "application/ld+json"}) if soup else []):
-        try:
-            data = json.loads(script.string or script.get_text())
-        except (TypeError, ValueError):
-            continue
-        stack = data if isinstance(data, list) else [data]
-        while stack:
-            item = stack.pop(0)
-            if isinstance(item, dict):
-                date_value = item.get("datePublished")
-                if date_value:
-                    return _clean(date_value)[:120]
-                stack.extend(value for value in item.values() if isinstance(value, (dict, list)))
-            elif isinstance(item, list):
-                stack.extend(item)
-    meta = soup.find("meta", attrs={"property": "article:published_time"}) if soup else None
-    if meta and meta.get("content"):
-        return _clean(meta.get("content"))[:120]
-    selectors = ["time[datetime]", ".date", ".published", ".entry-date", ".post-date", ".article-date", ".publication-date", ".timestamp", "[class*=date]", "[class*=published]"]
-    for container in (node, soup):
-        if container is None:
-            continue
-        for selector in selectors:
-            candidate = container.select_one(selector)
-            if candidate:
-                value = candidate.get("datetime") or candidate.get_text(" ", strip=True)
-                if value:
-                    return _clean(value)[:120]
-    return "—"
+        remaining = 200 - total
+        if remaining <= 0:
+            break
+        fragment = fragment[:remaining]
+        parts.append(fragment)
+        total += len(fragment) + (1 if parts else 0)
+    return _summary_text(" ".join(parts))
 
 
 def extract_articles(soup, base_url):
@@ -259,7 +191,8 @@ def extract_articles(soup, base_url):
                 title_node = node.select_one(".title, .entry-title, .post-title, [class*='title']")
             anchor = node.find("a", href=True)
             href = anchor.get("href", "") if anchor else ""
-            date_text = _extract_date(node, soup)
+            date_node = node.find("time") or node.select_one(".date, .published, .entry-date, [class*='date']")
+            date_text = (date_node.get("datetime") or date_node.get_text(" ", strip=True)) if date_node else ""
             if title_node is None and anchor:
                 title_node = anchor
         title = _clean(title_node.get_text(" ", strip=True)) if title_node else ""
@@ -271,20 +204,11 @@ def extract_articles(soup, base_url):
         summary = _article_summary(node, soup)
         if not contains_iran_keyword(title + " " + summary):
             continue
+        title_fa = translate_to_persian(title)
         seen.add(link)
-        articles.append({"title":title[:300],"url":link,"date":_clean(date_text)[:120] or "—","summary":summary})
+        articles.append({"title":title[:300],"title_fa":title_fa,"url":link,"date":_clean(date_text)[:120],"summary":summary})
         if len(articles) >= 8:
             break
-    return articles
-
-
-def translate_articles(articles):
-    """Translate article titles and summaries, retaining originals on failure."""
-    for index, article in enumerate(articles or []):
-        article["title_fa"] = translate_to_persian(article.get("title", ""), context="title") or article.get("title", "")
-        article["summary_fa"] = translate_to_persian(article.get("summary", ""), context="summary") or article.get("summary", "")
-        if index < len(articles) - 1:
-            time.sleep(0.5)
     return articles
 
 
@@ -314,10 +238,12 @@ def scan_region(region_key):
                     continue
                 seen.add(article["url"])
                 article.update({"think_tank":tank["name"],"country":tank["country"],"region":region_key})
+                if not article.get("title_fa"):
+                    article["title_fa"] = translate_to_persian(article["title"])
+                article["summary_fa"] = translate_to_persian(article["summary"]) if article["summary"] else ""
                 results.append(article)
         except Exception:
             logging.exception("Error scanning %s",tank["name"])
-    translate_articles(results)
     _save_json(region_key,date_str,results)
     return results
 
@@ -343,7 +269,7 @@ def build_excel(data, filepath):
         c=ws.cell(1,col,label); c.fill=navy; c.font=white_bold; c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); c.border=border
     ws.row_dimensions[1].height=30
     for i,item in enumerate(data,1):
-        values=[i,item.get("title_fa") or item.get("title") or "بدون عنوان", "%s / %s"%(REGION_FA.get(item.get("region",""),item.get("region","")),item.get("country","")), item.get("date") or "—",item.get("url","") or "",item.get("summary_fa") or item.get("summary") or ""]
+        values=[i,item.get("title_fa") or "بدون عنوان", "%s / %s"%(REGION_FA.get(item.get("region",""),item.get("region","")),item.get("country","")), item.get("date") or "—",item.get("url","") or "",item.get("summary_fa") or item.get("summary") or ""]
         for col,value in enumerate(values,1):
             if col != 1 and isinstance(value,str) and value[:1] in ("=","+","-","@"):
                 value="'"+value
@@ -375,7 +301,7 @@ def build_word(data, filepath):
     date_str=(data[0].get("_report_date") if data else None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     p=doc.add_paragraph(); _rtl(p,WD_ALIGN_PARAGRAPH.CENTER); _run_style(p.add_run("تاریخ گزارش: "+date_str),12)
     for item in data:
-        h=doc.add_heading(item.get("title_fa") or item.get("title") or "بدون عنوان",2); _rtl(h)
+        h=doc.add_heading(item.get("title_fa") or "بدون عنوان",2); _rtl(h)
         for r in h.runs: _run_style(r,16,True,RGBColor(31,56,100))
         p=doc.add_paragraph(); _rtl(p); _run_style(p.add_run("%s | %s | %s"%(item.get("think_tank",""),item.get("country",""),item.get("date") or "—")),11)
         p=doc.add_paragraph(); _rtl(p); _run_style(p.add_run(item.get("url","") or ""),11,False,RGBColor(5,99,193),True)
