@@ -86,11 +86,11 @@ def _parse_date(value):
 
 def is_recent(date_str, hours=48):
     if date_str is None or not str(date_str).strip():
-        return False
+        return True
     parsed = _parse_date(date_str)
     if parsed is None:
         logging.info("Skipping unparseable date: %s", _clean(date_str)[:80])
-        return False
+        return True
     return parsed >= datetime.now(timezone.utc) - timedelta(hours=hours)
 
 
@@ -334,7 +334,7 @@ def _dedupe(data):
 
 def build_excel(data, filepath):
     wb = Workbook(); ws = wb.active; ws.title = "گزارش"; ws.sheet_view.rightToLeft = True
-    labels = ["ردیف","عنوان گزارش","قاره کشور","نام اندیشکده","تاریخ","آدرس وب‌سایت","چکیده فارسی"]
+    labels = ["ردیف","عنوان گزارش","قاره کشور","تاریخ","آدرس وب‌سایت","چکیده فارسی"]
     navy = PatternFill("solid",fgColor="1F3864"); alternate = PatternFill("solid",fgColor="DCE6F1")
     white_bold = Font(name="Tahoma",bold=True,color="FFFFFF",size=12)
     normal = Font(name="Tahoma",size=11); linkfont = Font(name="Tahoma",size=11,color="0563C1",underline="single")
@@ -343,17 +343,17 @@ def build_excel(data, filepath):
         c=ws.cell(1,col,label); c.fill=navy; c.font=white_bold; c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); c.border=border
     ws.row_dimensions[1].height=30
     for i,item in enumerate(data,1):
-        values=[i,item.get("title_fa") or item.get("title") or "بدون عنوان", "%s / %s"%(REGION_FA.get(item.get("region",""),item.get("region","")),item.get("country","")), item.get("think_tank") or "", item.get("date") or "—",item.get("url","") or "",item.get("summary_fa") or item.get("summary") or ""]
+        values=[i,item.get("title_fa") or item.get("title") or "بدون عنوان", "%s / %s"%(REGION_FA.get(item.get("region",""),item.get("region","")),item.get("country","")), item.get("date") or "—",item.get("url","") or "",item.get("summary_fa") or item.get("summary") or ""]
         for col,value in enumerate(values,1):
             if col != 1 and isinstance(value,str) and value[:1] in ("=","+","-","@"):
                 value="'"+value
-            c=ws.cell(i+1,col,value); c.font=linkfont if col==6 else normal; c.border=border
+            c=ws.cell(i+1,col,value); c.font=linkfont if col==5 else normal; c.border=border
             c.alignment=Alignment(horizontal="center" if col in (1,3,4) else "right",vertical="center",wrap_text=True)
             if i%2==0: c.fill=alternate
-            if col==6 and isinstance(value,str) and value.startswith("http") and len(value)<=255: c.hyperlink=value
+            if col==5 and isinstance(value,str) and value.startswith("http") and len(value)<=255: c.hyperlink=value
         ws.row_dimensions[i+1].height=55
-    for col,width in enumerate([10,42,28,22,22,46,62],1): ws.column_dimensions[get_column_letter(col)].width=width
-    ws.freeze_panes="A2"; ws.auto_filter.ref="A1:G%d"%max(1,len(data)+1)
+    for col,width in enumerate([10,42,28,22,46,62],1): ws.column_dimensions[get_column_letter(col)].width=width
+    ws.freeze_panes="A2"; ws.auto_filter.ref="A1:F%d"%max(1,len(data)+1)
     wb.save(filepath); return filepath
 
 
